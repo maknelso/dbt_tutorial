@@ -1,86 +1,90 @@
 with
+
     -- Import CTEs
-    customers as (select * from {{ source("jaffle_shop", "customers") }}),
+    customers as (select * from {{ ref("stg_jaffle_shop__customers") }}),
 
-    orders as (select * from {{ source("jaffle_shop", "orders") }}),
+    orders as (select * from {{ ref("stg_jaffle_shop__orders") }}),
 
-    payments as (select * from {{ source("stripe", "payment") }}),
+    payments as (select * from {{ ref("stg_stripe__payments") }}),
 
     -- Logical CTEs
     completed_payments as (
+
         select
-            orderid as order_id,
-            max(created) as payment_finalized_date,
-            sum(amount) / 100.0 as total_amount_paid
+            order_id,
+            max(payment_created) as payment_finalized_date,
+            sum(payment_amount) as total_amount_paid
         from payments
-        where status <> 'fail'
+        where payment_status <> 'fail'
         group by 1
+
     ),
 
     paid_orders as (
+
         select
-            orders.id as order_id,
-            orders.user_id as customer_id,
-            orders.order_date as order_placed_at,
-            orders.status as order_status,
+            orders.order_id,
+            orders.customer_id,
+            orders.order_date,
+            orders.order_status,
+
             completed_payments.total_amount_paid,
             completed_payments.payment_finalized_date,
-            customers.first_name as customer_first_name,
-            customers.last_name as customer_last_name
+
+            customers.first_name,
+            customers.last_name
         from orders
-        left join completed_payments on orders.id = completed_payments.order_id
-        left join customers on orders.user_id = customers.id
+        left join completed_payments on orders.order_id = completed_payments.order_id
+        left join customers on orders.customer_id = customers.customer_id
+
     ),
 
-    customer_lifetime_value as (
-        select 
-            paid_orders.order_id, 
-            sum(t2.total_amount_paid) as clv_bad
-        from paid_orders
-        left join paid_orders t2
-            on paid_orders.customer_id = t2.customer_id
-            and paid_orders.order_id >= t2.order_id
-        group by 1
-    ),
-
-    -- Final CTE (No more customer_orders join!)
+    -- Final CTE
     final as (
+
         select
-            paid_orders.*,
-            
-            -- Window functions for sequencing
+            order_id,
+            customer_id,
+            order_date,
+            order_status,
+            total_amount_paid,
+            payment_finalized_date,
+            first_name,
+            last_name,
+
+            -- sales transaction sequence
+            row_number() over (order by order_id) as transaction_seq,
+
+            -- customer sales sequence
             row_number() over (
-                order by paid_orders.order_id
-            ) as transaction_seq,
-            
-            row_number() over (
-                partition by paid_orders.customer_id 
-                order by paid_orders.order_id
+                partition by customer_id order by order_id
             ) as customer_sales_seq,
-            
-            -- New vs Returning Customer transformation logic (Rule 3 from screenshot)
+
+            -- new vs returning customer
             case
-                when (
-                    rank() over (
-                        partition by paid_orders.customer_id
-                        order by paid_orders.order_placed_at, paid_orders.order_id
-                    ) = 1
-                ) then 'new'
+                when
+                    (
+                        rank() over (
+                            partition by customer_id order by order_date, order_id
+                        )
+                        = 1
+                    )
+                then 'new'
                 else 'return'
             end as nvsr,
-            
-            -- Customer Lifetime Value reference
-            customer_lifetime_value.clv_bad as customer_lifetime_value,
-            
-            -- First Order Date simplified using first_value window function (Rule 1 & 3 from screenshot)
-            first_value(paid_orders.order_placed_at) over (
-                partition by paid_orders.customer_id 
-                order by paid_orders.order_placed_at
+
+            -- customer lifetime value
+            sum(total_amount_paid) over (
+                partition by customer_id order by order_date
+            ) as customer_lifetime_value,
+
+            -- first day of sale
+            first_value(order_date) over (
+                partition by customer_id order by order_date
             ) as fdos
-            
+
         from paid_orders
-        left outer join customer_lifetime_value 
-            on customer_lifetime_value.order_id = paid_orders.order_id
+
     )
 
 -- Simple Select Statement
