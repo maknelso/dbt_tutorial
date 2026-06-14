@@ -1,9 +1,27 @@
+{{
+    config(
+        materialized='incremental',
+        incremental_strategy='merge',
+        unique_key='customer_id',
+        on_schema_change='fail'
+    )
+}}
+
 with customers as (
     select * from {{ ref('stg_jaffle_shop__customers') }}
 ),
 
 orders as (
     select * from {{ ref('stg_jaffle_shop__orders') }}
+    -- if this table already eixst, only pull data that has arrived since last time we ran this model
+    {% if is_incremental() %}
+        -- Fixes Snowflake correlation error and targets the correct column name
+        where order_date >= (
+            select max_date from (
+                select max(most_recent_order_date) as max_date from {{ this }}
+            )
+        )
+    {% endif %}
 ),
 
 payments as (
@@ -16,7 +34,6 @@ customer_orders as (
         min(orders.order_date) as first_order_date,
         max(orders.order_date) as most_recent_order_date,
         count(orders.order_id) as number_of_orders,
-        -- Corrected: using 'payment_amount' from our stg_stripe__payments model
         sum(payments.payment_amount) as lifetime_value
     from orders
     left join payments using (order_id)
@@ -25,7 +42,7 @@ customer_orders as (
 
 final as (
     select
-        customers.customer_id,
+        customers.customer_id as customer_idd,
         customers.first_name,
         customers.last_name,
         customer_orders.first_order_date,
